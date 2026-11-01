@@ -1,0 +1,35 @@
+# 环境变量（含密钥，绝不入库）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时产物
+*.log
+.DS_Store
+Thumbs.db
+
+# 本地调试 / 截图
+.tools/
+.shots/
+
+# 视频 / 演示录制（体积大，通过 Gitee Release 或视频平台分发）
+video/
+*.webm
+*.mp4
+
+# 文档排版工作目录（中间产物，成品在 docs/screenshots 与文章里）
+docs/feishu/
+
+# 本地临时
+*.zip
+/tools/__pycache__/
+
+# 仓库只保留源代码与 README：文章、截图、文档排版脚本一律不入库
+docs/
+tools/
+CSDN_参赛征文_政策过期检测器.md

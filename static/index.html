@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>政策过期检测器 · Policy Validity Detector</title>
+<meta name="description" content="元宝搜索驱动 · 零幻觉政务核验 Agent：三路交叉求证，识别已废止、已到期、被新政替代的政策文件。" />
+<script src="https://cdn.tailwindcss.com/3.4.5"></script>
+<style>
+  [v-cloak]{display:none}
+  html,body{height:100%}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif}
+  .mono{font-family:"JetBrains Mono","Cascadia Code",Consolas,"Courier New",monospace}
+
+  .card{background:#fff;border:1px solid rgba(226,232,240,.9);border-radius:14px;
+    box-shadow:0 1px 2px rgba(15,23,42,.04);transition:box-shadow .2s}
+  .card:hover{box-shadow:0 4px 16px rgba(15,23,42,.06)}
+
+  .seal{filter:drop-shadow(0 2px 6px rgba(15,23,42,.08))}
+  .meter{height:8px;border-radius:999px;background:#f1f5f9;overflow:hidden}
+  .meter > i{display:block;height:100%;border-radius:999px;transition:width .9s cubic-bezier(.2,.8,.2,1)}
+
+  .step-dot{width:18px;height:18px;border-radius:999px;display:grid;place-items:center;
+    font-size:9px;font-weight:700;border-width:1px;transition:all .25s}
+  .step-pending{background:#fff;border-color:#e2e8f0;color:#94a3b8}
+  .step-active{background:#2563eb;border-color:#2563eb;color:#fff;animation:pulseSoft 1.6s ease-in-out infinite}
+  .step-done{background:#eff6ff;border-color:#bfdbfe;color:#2563eb}
+  @keyframes pulseSoft{0%,100%{box-shadow:0 0 0 0 rgba(37,99,235,.35)}50%{box-shadow:0 0 0 4px rgba(37,99,235,0)}}
+
+  .tl-dot{position:absolute;left:-25px;top:4px;width:8px;height:8px;border-radius:999px;
+    box-shadow:0 0 0 3px #fff,0 0 0 4px rgba(191,219,254,.6)}
+
+  .key-old{font-weight:600;color:#be123c;text-decoration:underline;
+    text-decoration-color:rgba(244,63,94,.45);text-underline-offset:3px}
+  .key-new{font-weight:600;color:#065f46;background:rgba(209,250,229,.9);
+    padding:0 3px;border-radius:4px}
+
+  .query{background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:7px 9px;
+    font-family:"JetBrains Mono",Consolas,monospace;font-size:11px;line-height:1.65;
+    color:#475569;white-space:pre-wrap;overflow-wrap:break-word;word-break:normal}
+
+  .fade-in{animation:fadeUp .28s ease both}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .no-scrollbar::-webkit-scrollbar{display:none}
+  .no-scrollbar{-ms-overflow-style:none;scrollbar-width:none}
+  .thin::-webkit-scrollbar{width:6px;height:6px}
+  .thin::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:3px}
+  .thin::-webkit-scrollbar-thumb:hover{background:#cbd5e1}
+
+  .spin{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .shimmer{background:linear-gradient(90deg,#f1f5f9,#e2e8f0,#f1f5f9);
+    background-size:200% 100%;animation:shimmer 1.3s infinite}
+  @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased">
+<div id="app" v-cloak class="min-h-screen flex">
+
+  <!-- ==================== 左侧导航边栏 ==================== -->
+  <aside class="w-64 shrink-0 bg-white border-r border-slate-200 flex flex-col justify-between sticky top-0 h-screen z-30">
+    <div class="flex flex-col min-h-0 flex-1">
+      <!-- 品牌区 -->
+      <div class="px-5 py-4 border-b border-slate-100">
+        <div class="flex items-center gap-2.5">
+          <div class="w-10 h-10 shrink-0 rounded-lg bg-slate-900 border border-blue-800 grid place-items-center shadow-sm">
+            <!-- 公文卷宗 + 时效核验章：文件本体为白色线条，右下角叠加翠绿罗盘 -->
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6.2 3.6h6.6l3.9 3.9v10.1a1.8 1.8 0 0 1-1.8 1.8H6.2a1.8 1.8 0 0 1-1.8-1.8V5.4a1.8 1.8 0 0 1 1.8-1.8Z" stroke="#e2e8f0" stroke-width="1.45"/>
+              <path d="M12.8 3.6v3.9h3.9" stroke="#e2e8f0" stroke-width="1.45"/>
+              <path d="M7.6 10.6h4.6M7.6 13.1h3.1" stroke="#93c5fd" stroke-width="1.35"/>
+              <circle cx="15.6" cy="16.4" r="4.3" fill="#0f172a" stroke="#34d399" stroke-width="1.35"/>
+              <path d="M15.6 14.2v2.3l1.6 1" stroke="#34d399" stroke-width="1.25"/>
+            </svg>
+          </div>
+          <div class="min-w-0">
+            <div class="text-[13.5px] font-bold text-slate-900 leading-tight whitespace-nowrap">政策过期检测器</div>
+            <div class="text-[9px] text-slate-400 mono tracking-[0.14em] mt-0.5">POLICY VALIDITY DETECTOR</div>
+          </div>
+        </div>
+        <div class="mt-3 space-y-1.5">
+          <div class="inline-flex items-center px-2 py-0.5 rounded-md bg-blue-600 text-white text-[10px] font-medium">
+            元宝搜索驱动 Agent
+          </div>
+          <div class="flex items-center gap-1.5 text-[10.5px] text-slate-500">
+            <span class="relative flex h-1.5 w-1.5 shrink-0">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+            </span>
+            <span class="truncate">{{ engineStatusText }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 核心核验功能 -->
+      <nav class="px-2.5 py-3 space-y-0.5">
+        <div class="px-2 pb-1.5 text-[9.5px] font-semibold tracking-[0.12em] text-slate-400">核心核验功能</div>
+        <button v-for="n in navItems" :key="n.key" @click="setView(n.key)"
+          class="w-full flex items-start gap-2 px-2.5 py-1.5 rounded-lg transition text-left"
+          :class="activeView === n.key ? 'bg-blue-50' : 'hover:bg-slate-50'">
+          <svg class="shrink-0 mt-0.5" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               :stroke="activeView === n.key ? '#1d4ed8' : 'currentColor'"
+               :class="activeView === n.key ? '' : 'text-slate-400'"
+               stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <circle v-for="(c, ci) in n.icon.circles" :key="'c' + ci" :cx="c[0]" :cy="c[1]" :r="c[2]"/>
+            <path v-for="(d, pi) in n.icon.paths" :key="'p' + pi" :d="d"/>
+          </svg>
+          <span class="min-w-0 flex-1">
+            <span class="block text-[12.5px] leading-tight truncate"
+                  :class="activeView === n.key ? 'text-blue-700 font-semibold' : 'text-slate-700'">{{ n.label }}</span>
+            <span class="block text-[9.5px] leading-tight mt-0.5 truncate"
+                  :class="activeView === n.key ? 'text-blue-500' : 'text-slate-400'">{{ n.sub }}</span>
+          </span>
+          <span v-if="n.badge" class="shrink-0 mt-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-semibold mono"
+                :class="activeView === n.key ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-600 border border-blue-200'">{{ n.badge }}</span>
+        </button>
+      </nav>
+
+      <!-- 典型业务场景 -->
+      <div class="px-2.5 py-2 border-t border-slate-100 flex-1 min-h-0 overflow-y-auto thin">
+        <div class="px-2 pb-1.5 text-[9.5px] font-semibold tracking-[0.12em] text-slate-400">典型政策场景</div>
+        <button v-for="p in presets" :key="p.id" @click="selectPreset(p)"
+          class="w-full flex items-start gap-2 px-2.5 py-1.5 rounded-lg text-left transition"
+          :class="activePreset === p.id ? 'bg-slate-100' : 'hover:bg-slate-50'">
+          <i class="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5" :style="{background: presetColor(p)}"></i>
+          <span class="min-w-0 flex-1">
+            <span class="block text-[11.5px] leading-tight truncate" :class="activePreset === p.id ? 'text-slate-900 font-medium' : 'text-slate-600'">{{ presetName(p) }}</span>
+            <span class="block text-[9px] leading-tight mt-0.5 text-slate-400 truncate">{{ presetSub(p) }}</span>
+          </span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 开发工具 -->
+    <div class="px-2.5 py-2.5 border-t border-slate-100 space-y-0.5">
+      <button @click="toggleAll"
+        class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11.5px] transition border"
+        :class="activeView === 'all'
+          ? 'bg-blue-50 text-blue-600 border-blue-200 font-medium'
+          : 'text-slate-500 border-transparent hover:bg-slate-50'">
+        <svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 3h7v7H3z"/><path d="M14 3h7v7h-7z"/><path d="M14 14h7v7h-7z"/><path d="M3 14h7v7H3z"/>
+        </svg>
+        <span class="flex-1 text-left">全景展开模式</span>
+        <span class="inline-flex items-center w-7 h-4 rounded-full transition-colors"
+              :class="activeView === 'all' ? 'bg-blue-500' : 'bg-slate-200'">
+          <i class="block w-3 h-3 rounded-full bg-white shadow-sm transition-all"
+             :style="{marginLeft: activeView === 'all' ? '14px' : '2px'}"></i>
+        </span>
+      </button>
+      <!-- 引擎与密钥设置：入口置于开发工具区最上方，与 API 调试形成「先配钥匙、再调接口」的顺序 -->
+      <button @click="openSettings"
+        class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[12px] transition"
+        :class="settingsOpen ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'">
+        <svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/>
+          <circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>
+        </svg>
+        <span class="flex-1 text-left">引擎与密钥设置</span>
+        <span class="shrink-0 px-1.5 py-0.5 rounded-md text-[9px] font-semibold border"
+              :class="hasCustomKey
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : (serverRuntimeActive
+                  ? 'bg-blue-50 text-blue-700 border-blue-200'
+                  : 'bg-slate-50 text-slate-500 border-slate-200')">
+          {{ hasCustomKey ? '已接入密钥' : (serverRuntimeActive ? '服务端已配置' : '系统默认') }}
+        </span>
+      </button>
+      <button @click="openDrawer"
+        class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[12px] text-slate-600 hover:bg-slate-50 transition">
+        <svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>
+        </svg>
+        开放 API 接口调试
+      </button>
+      <a href="/docs" target="_blank" rel="noopener"
+        class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[12px] text-slate-600 hover:bg-slate-50 transition">
+        <svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 7v14"/>
+          <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>
+        </svg>
+        Swagger 接口文档
+      </a>
+      <div class="px-2.5 pt-1 text-[9px] mono text-slate-300">build {{ buildTag }}</div>
+    </div>
+  </aside>
+
+  <!-- ==================== 右侧工作区 ==================== -->
+  <main class="flex-1 flex flex-col min-w-0 h-screen">
+
+    <!-- 紧凑检索栏 -->
+    <header class="shrink-0 bg-white/90 backdrop-blur border-b border-slate-200 z-20">
+      <div class="px-5 py-2.5 flex items-center gap-2">
+        <select v-model="regionHint" @change="activePreset = null"
+          class="h-9 w-[168px] shrink-0 px-2 rounded-lg border border-slate-200 bg-slate-50/60 text-[12px] text-slate-700 outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-500/10 transition">
+          <option value="auto">全国通查 · 自动识别</option>
+          <optgroup label="国务院 / 部委">
+            <option v-for="m in regions.ministries" :key="m.key" :value="m.key">{{ m.name }}</option>
+          </optgroup>
+          <optgroup label="省级行政区（34）">
+            <option v-for="p in regions.provinces" :key="p.key" :value="p.key">{{ p.name }}</option>
+          </optgroup>
+          <optgroup label="重点城市">
+            <option v-for="c in regions.cities" :key="c.key" :value="c.key">{{ c.name }}</option>
+          </optgroup>
+        </select>
+
+        <span class="mono text-[10px] px-1.5 py-1 rounded bg-blue-50 text-blue-700 border border-blue-100 shrink-0 hidden xl:inline-flex items-center gap-1">
+          <i class="w-1 h-1 rounded-full bg-blue-500"></i>{{ selectedRegion.gov_domain || 'gov.cn' }}
+        </span>
+
+        <input v-model="rawInput" @keydown.enter="runVerify"
+          placeholder="输入政策名称 / 发文字号 / 申报问题，例如：京政办发〔2020〕12号"
+          class="flex-1 min-w-0 h-9 px-3 rounded-lg border border-slate-200 bg-slate-50/60 text-[12.5px] text-slate-700 placeholder:text-slate-400 outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-500/10 transition" />
+
+        <button @click="runVerify" :disabled="running || rawInput.trim().length < 2"
+          class="h-9 px-4 shrink-0 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-[12.5px] font-semibold shadow-sm shadow-blue-500/25 hover:opacity-95 disabled:opacity-40 disabled:cursor-not-allowed transition inline-flex items-center gap-1.5">
+          <svg v-if="!running" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+          <svg v-else class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>
+          {{ running ? '求证中…' : '开始多路求证' }}
+        </button>
+      </div>
+
+      <!-- 紧凑流水线 + 文号自动识别标签 -->
+      <div class="px-5 pb-2 flex items-center gap-1 overflow-x-auto no-scrollbar">
+        <div v-if="autoTags.length" class="flex items-center gap-1 shrink-0 mr-2">
+          <span v-for="(t, ti) in autoTags" :key="ti"
+                class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-100 text-[9.5px] mono">
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+            {{ t }}
+          </span>
+          <span class="h-3 w-px bg-slate-200 mx-1"></span>
+        </div>
+        <template v-for="(s, i) in stageDefs" :key="s.key">
+          <div class="flex items-center gap-1 shrink-0">
+            <span class="step-dot" :class="'step-' + stageState(s.key)">
+              <svg v-if="stageState(s.key)==='done'" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round"><path d="m4 12 5 5L20 6"/></svg>
+              <span v-else>{{ i + 1 }}</span>
+            </span>
+            <span class="text-[10.5px] whitespace-nowrap" :class="stageState(s.key)==='pending' ? 'text-slate-400' : 'text-slate-700 font-medium'">{{ s.label }}</span>
+          </div>
+          <div v-if="i < stageDefs.length - 1" class="h-px w-4 shrink-0"
+               :class="stageState(s.key)==='done' ? 'bg-blue-400' : 'bg-slate-200'"></div>
+        </template>
+        <div class="ml-auto shrink-0 text-[10px] mono text-slate-400 hidden md:block">
+          {{ result ? ('耗时 ' + result.elapsed_ms + ' ms') : '待取证' }}
+        </div>
+      </div>
+    </header>
+
+    <!-- 动态视图容器 -->
+    <div class="flex-1 min-h-0 p-4 thin overflow-y-auto">
+
+      <!-- 运行中：实时三路 -->
+      <div v-if="running" class="h-full flex flex-col">
+        <div class="flex items-center justify-between mb-2.5">
+          <div class="flex items-center gap-2">
+            <span class="w-4 h-4 rounded bg-emerald-50 text-emerald-600 border border-emerald-200 grid place-items-center text-[8px] font-bold mono">LIVE</span>
+            <span class="text-[12.5px] font-semibold text-slate-800">元宝搜索三路并发检索中</span>
+            <span class="text-[10.5px] text-slate-400">{{ liveDone }} / 3 通道</span>
+          </div>
+          <span class="mono text-[10.5px] text-blue-600 font-semibold">{{ liveProgress }}%</span>
+        </div>
+        <div class="h-1 rounded-full bg-slate-100 overflow-hidden mb-3">
+          <div class="h-full rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-500"
+               :style="{width: liveProgress + '%'}"></div>
+        </div>
+        <div class="grid grid-cols-3 gap-3 flex-1 min-h-0">
+          <article v-for="(t, i) in liveTraces" :key="i"
+            class="card p-3.5 flex flex-col min-h-0"
+            :class="t.state === 'running' ? 'border-blue-300 bg-blue-50/30' : (t.state === 'done' ? '' : 'opacity-70')">
+            <div class="flex items-center justify-between">
+              <span class="text-[9.5px] font-semibold text-slate-500 mono">CHANNEL {{ t.step }}</span>
+              <span v-if="t.state === 'done'" class="text-[9.5px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">{{ displayHits(t).length }} 条</span>
+              <span v-else-if="t.state === 'running'" class="inline-flex items-center gap-1 text-[9.5px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">
+                <i class="w-1 h-1 rounded-full bg-blue-500 animate-pulse"></i>检索中
+              </span>
+              <span v-else class="text-[9.5px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">排队中</span>
+            </div>
+            <h3 class="mt-1.5 text-[12px] font-semibold text-slate-800 leading-snug">{{ t.channel }}</h3>
+            <div class="query mt-1.5" :class="t.state === 'pending' ? 'text-slate-400' : ''">{{ t.query || '等待检索词生成…' }}</div>
+            <div v-if="t.state === 'running'" class="mt-2 space-y-1">
+              <div class="h-1.5 rounded shimmer"></div>
+              <div class="h-1.5 rounded shimmer w-4/5"></div>
+            </div>
+            <p v-else class="mt-1.5 text-[11px] leading-relaxed" :class="t.state === 'done' ? 'text-slate-600' : 'text-slate-400'">
+              {{ t.state === 'done' ? cleanText(t.key_finding) : '待前序通道完成' }}
+            </p>
+          </article>
+        </div>
+      </div>
+
+      <!-- 空态 -->
+      <div v-else-if="!result" class="h-full grid place-items-center">
+        <div class="max-w-2xl w-full">
+          <div class="text-center mb-5">
+            <div class="text-[15px] font-semibold text-slate-800">把政策名或文号丢进来，三路交叉求证它今天还算不算数</div>
+            <div class="text-[11.5px] text-slate-400 mt-1.5">原文溯源 · 废止排查 · 新政替代 —— 只查原文会漏掉后两项</div>
+          </div>
+          <div class="grid grid-cols-3 gap-3">
+            <div v-for="(b, i) in emptyBlocks" :key="i" class="card p-4">
+              <div class="flex items-center gap-2">
+                <span class="w-5 h-5 rounded-md bg-slate-50 border border-slate-200 text-slate-500 grid place-items-center text-[9px] font-bold mono">{{ i + 1 }}</span>
+                <h3 class="text-[12px] font-semibold text-slate-800">{{ b.t }}</h3>
+              </div>
+              <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">{{ b.d }}</p>
+            </div>
+          </div>
+          <p class="mt-4 text-center text-[11px] text-slate-400">点击左侧任一案例即可查看完整核验链路</p>
+        </div>
+      </div>
+
+      <!-- ============ 视图：核验结论总览 ============ -->
+      <div v-if="result && isView('overview')" :class="activeView === 'all' ? 'mb-4 fade-in' : 'h-full fade-in'">
+        <div class="grid grid-cols-12 gap-4" >
+
+          <!-- 01 判定 -->
+          <section class="card col-span-12 lg:col-span-4 p-4 relative overflow-hidden flex flex-col"
+                   >
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 rounded-md bg-blue-50 text-blue-600 border border-blue-200 text-[10px] font-bold mono">01</span>
+              <span class="text-[10px] font-semibold tracking-wider text-slate-400">效力判定 · VERDICT</span>
+            </div>
+
+            <svg class="seal absolute right-3 top-2 w-[92px] h-[92px] opacity-90 pointer-events-none"
+                 viewBox="0 0 120 120" style="transform:rotate(-12deg)" aria-hidden="true">
+              <circle cx="60" cy="60" r="54" fill="none" :stroke="statusTheme.hex" stroke-width="2.2" opacity=".55"/>
+              <circle cx="60" cy="60" r="46" fill="none" :stroke="statusTheme.hex" stroke-width="1" stroke-dasharray="3 4" opacity=".45"/>
+              <path :fill="statusTheme.hex" opacity=".5"
+                    d="M60 24 l4.1 8.4 9.3 1.4 -6.7 6.5 1.6 9.2 -8.3-4.3 -8.3 4.3 1.6-9.2 -6.7-6.5 9.3-1.4z"/>
+              <text x="60" y="72" text-anchor="middle" :fill="statusTheme.hex" font-size="14" font-weight="700" letter-spacing="1">{{ statusTheme.short }}</text>
+              <text x="60" y="86" text-anchor="middle" :fill="statusTheme.hex" font-size="7.5" letter-spacing="2" opacity=".7">VERIFIED</text>
+              <text x="60" y="97" text-anchor="middle" :fill="statusTheme.hex" font-size="6.5" letter-spacing="1.4" opacity=".55">SEARCH · CHECKED</text>
+            </svg>
+
+            <div class="mt-2.5 pr-24">
+              <h2 class="text-[22px] font-bold leading-tight" :style="{color: statusTheme.hex}">{{ result.validity_result.status_label }}</h2>
+              <div class="mt-1 flex items-center gap-1 min-w-0">
+                <span class="text-[11px] leading-snug truncate"
+                      :class="result.policy_meta.title ? 'text-slate-700 font-medium' : 'text-slate-500'"
+                      :title="result.policy_meta.title || result.policy_meta.topic">{{ result.policy_meta.title || ('主题检索：' + (result.policy_meta.topic || '未识别')) }}</span>
+                <span v-if="result.policy_meta.locked_policy_title"
+                      class="shrink-0 px-1 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-100 text-[8.5px] font-medium">焦点锁定</span>
+              </div>
+              <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span class="mono inline-flex items-center px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px]">{{ result.policy_meta.doc_number || '未标注文号' }}</span>
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 border border-slate-200 text-[10px]">{{ result.policy_meta.region }}</span>
+              </div>
+            </div>
+
+            <div class="mt-2.5 overflow-y-auto thin" :class="activeView === 'all' ? '' : 'min-h-0'">
+              <p class="text-[12px] leading-relaxed text-slate-600 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                {{ cleanText(result.validity_result.summary) }}
+              </p>
+
+              <div v-if="evidenceLines.length" class="mt-2.5">
+                <div class="text-[9px] font-semibold tracking-[0.1em] text-slate-400 mb-1.5">判定依据 · EVIDENCE CHAIN</div>
+                <ul class="space-y-1.5">
+                  <li v-for="(e, ei) in evidenceLines" :key="ei" class="flex gap-1.5 text-[10.5px] leading-relaxed text-slate-600">
+                    <span class="shrink-0 mt-[5px] w-1 h-1 rounded-full" :style="{background: statusTheme.hex, opacity: .65}"></span>
+                    <span class="min-w-0">{{ e }}</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- 结构化要素提取网格 -->
+            <div class="grid grid-cols-2 gap-2 bg-slate-50/80 p-2.5 rounded-lg border border-slate-100 mt-2.5">
+              <div v-for="m in metaGrid" :key="m.k" class="min-w-0">
+                <div class="text-[9px] text-slate-400">{{ m.k }}</div>
+                <div class="text-[10.5px] font-medium text-slate-700 leading-snug break-words">{{ m.v }}</div>
+              </div>
+            </div>
+
+            <div class="pt-2.5 space-y-2 mt-auto">
+              <div v-for="g in gauges" :key="g.k">
+                <div class="flex justify-between items-baseline text-[11px] font-semibold text-slate-700 mb-1">
+                  <span>{{ g.k }}</span>
+                  <span class="mono">{{ g.v }} <span class="text-slate-400 font-normal">/ 100</span></span>
+                </div>
+                <div class="meter"><i :style="{width: g.v + '%', background: g.grad}"></i></div>
+              </div>
+            </div>
+
+            <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-400">
+              <span class="truncate">{{ result.policy_meta.department }}</span>
+              <span class="mono shrink-0 ml-2">{{ result.elapsed_ms }} ms</span>
+            </div>
+          </section>
+
+          <!-- 02 对比 -->
+          <section class="card col-span-12 lg:col-span-8 p-4 flex flex-col"
+                   >
+            <div class="flex items-center gap-2 mb-2.5">
+              <span class="px-2 py-0.5 rounded-md bg-blue-50 text-blue-600 border border-blue-200 text-[10px] font-bold mono">02</span>
+              <span class="text-[10px] font-semibold tracking-wider text-slate-400">少点幻觉，多点搜索 · COMPARISON</span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 flex-1 min-h-0">
+              <div class="rounded-xl bg-rose-50/50 border border-rose-200/80 p-3.5 flex flex-col min-h-0">
+                <div class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-200 text-[10.5px] font-semibold self-start">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>
+                  </svg>
+                  未接入搜索：训练语料滞后幻觉
+                </div>
+                <div class="mt-2.5 overflow-y-auto thin flex-1 min-h-0 flex flex-col justify-center">
+                  <p class="text-[12px] leading-relaxed text-slate-600">
+                    <span>{{ naiveSplit.head }}</span><span
+                      v-if="naiveSplit.claim"
+                      class="line-through decoration-rose-300 decoration-1 bg-rose-100/80 text-rose-800 px-1 rounded">{{ naiveSplit.claim }}</span>
+                  </p>
+                </div>
+                <p class="mt-auto pt-2 text-[10px] text-rose-500/90 flex items-start gap-1">
+                  <svg class="shrink-0 mt-[1px]" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m21.7 18-8-14a2 2 0 0 0-3.5 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3z"/>
+                    <path d="M12 9v4"/><path d="M12 17h.01"/>
+                  </svg>
+                  <span>幻觉成因：{{ hallucinationCause }}</span>
+                </p>
+              </div>
+
+              <div class="rounded-xl bg-emerald-50/50 border border-emerald-200/80 p-3.5 flex flex-col min-h-0">
+                <div class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10.5px] font-semibold self-start">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-4.8"/>
+                  </svg>
+                  元宝搜索实时求证：精准拦截过期风险
+                </div>
+                <div class="mt-2.5 overflow-y-auto thin flex-1 min-h-0 flex flex-col justify-center">
+                  <p class="text-[12px] leading-relaxed text-slate-700">{{ cleanText(result.validity_result.hallucination_comparison.yuanbao_verified_answer) }}</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- 实操申报避坑与替代行动指南 -->
+            <div class="bg-blue-50/40 border border-blue-100 rounded-lg px-3 py-2.5 grid grid-cols-2 gap-3 mt-2.5">
+              <div class="min-w-0">
+                <div class="flex items-center gap-1 text-[9.5px] font-semibold text-rose-700">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>
+                  </svg>
+                  拦截风险动作
+                </div>
+                <p class="mt-1 text-[10.5px] leading-relaxed text-slate-600">{{ guide.risk }}</p>
+              </div>
+              <div class="min-w-0">
+                <div class="flex items-center gap-1 text-[9.5px] font-semibold text-blue-700">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-4.8"/>
+                  </svg>
+                  现行办理指引
+                </div>
+                <p class="mt-1 text-[10.5px] leading-relaxed text-slate-600">{{ guide.action }}</p>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-4 gap-2.5 pt-2.5 mt-2.5 border-t border-slate-100">
+              <div v-for="s in stats4" :key="s.k" class="bg-slate-50 rounded-lg py-2 text-center">
+                <div class="text-[9.5px] text-slate-500">{{ s.k }}</div>
+                <div class="mt-0.5 text-[12.5px] font-semibold text-slate-800 mono">{{ s.v }}</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- ============ 视图：三路思考链 ============ -->
+      <div v-if="result && isView('trace')" :class="activeView === 'all' ? 'mb-4 fade-in' : 'h-full fade-in'">
+        <div class="grid grid-cols-3 gap-4" >
+          <article v-for="t in result.search_trace" :key="t.step"
+            class="card p-3.5 flex flex-col min-h-0" >
+            <div class="flex items-center justify-between gap-2">
+              <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-50 text-slate-600 border border-slate-200">
+                <i class="w-1.5 h-1.5 rounded-full" :style="{background: channelColor(t)}"></i>{{ channelTag(t) }}
+              </span>
+              <span class="mono text-[9.5px] text-slate-400 shrink-0">{{ t.latency_ms }} ms</span>
+            </div>
+
+            <h3 class="mt-1.5 text-[12px] font-semibold text-slate-800 leading-snug">{{ channelTitle(t) }}</h3>
+            <div class="query mt-1.5">{{ t.query }}</div>
+
+            <div class="mt-2 flex-1 min-h-0 overflow-y-auto thin pr-0.5">
+              <p class="text-[11.5px] leading-relaxed text-slate-600">{{ cleanText(t.key_finding) }}</p>
+
+              <div v-if="expanded[t.step] !== false" class="mt-2 space-y-1.5">
+                <a v-for="(h, hi) in displayHits(t)" :key="hi" :href="h.url" target="_blank" rel="noopener"
+                   class="block rounded-lg border border-slate-200 bg-slate-50/60 p-2 hover:border-blue-300 hover:bg-blue-50/40 transition">
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="px-1 py-0.5 rounded text-[9px] font-semibold border" :style="trustStyle(h.trust_level)">{{ h.trust_level }}</span>
+                    <span class="mono text-[9px] text-slate-400">{{ h.site }}</span>
+                    <span class="mono text-[9px] text-slate-400 ml-auto">{{ h.publish_time }}</span>
+                  </div>
+                  <div class="mt-1 text-[11px] font-medium text-slate-700 leading-snug line-clamp-2">{{ h.title }}</div>
+                </a>
+              </div>
+            </div>
+
+            <div class="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
+              <span class="text-[10px] text-slate-400">命中 {{ displayHits(t).length }} 条</span>
+              <button @click="toggleHits(t.step)" class="text-[10px] font-medium text-blue-600 hover:text-blue-700">
+                {{ expanded[t.step] === false ? '展开证据' : '收起证据' }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <!-- ============ 视图：演进与条款对比 ============ -->
+      <div v-if="result && isView('diff')" :class="activeView === 'all' ? 'mb-4 fade-in' : 'h-full fade-in'">
+        <div class="grid grid-cols-12 gap-4" >
+
+          <!-- 04 时间轴 -->
+          <section class="card col-span-12 lg:col-span-4 p-4 flex flex-col"
+                   >
+            <div class="flex items-center gap-2 mb-3">
+              <span class="px-2 py-0.5 rounded-md bg-blue-50 text-blue-600 border border-blue-200 text-[10px] font-bold mono">04</span>
+              <span class="text-[10px] font-semibold tracking-wider text-slate-400">政策演进生命周期 · TIMELINE</span>
+            </div>
+
+            <div class="border-l-2 border-blue-200 ml-3 pl-4 space-y-3.5 overflow-y-auto thin"
+                 :class="activeView === 'all' ? '' : 'min-h-0'">
+              <div v-for="(n, i) in result.timeline" :key="i" class="relative">
+                <span class="tl-dot" :style="{background: tlColor(n.status)}"></span>
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="mono text-[9.5px] px-1 py-0.5 rounded bg-slate-100 text-slate-600">{{ n.date }}</span>
+                  <span class="text-[12px] font-semibold text-slate-800">{{ n.event }}</span>
+                </div>
+                <p class="mt-0.5 text-[10.5px] text-slate-500 leading-relaxed">{{ cleanText(n.doc) }}</p>
+              </div>
+            </div>
+
+            <div class="mt-auto pt-3">
+              <div class="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                <div class="flex items-center gap-1.5 mb-2">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><path d="M4 7h16M4 12h10M4 17h7"/></svg>
+                  <span class="text-[9px] font-bold mono tracking-wider text-slate-400">公文效力档案卡 · METADATA</span>
+                </div>
+                <div class="grid grid-cols-2 gap-x-3 gap-y-2">
+                  <div v-for="a in archive" :key="a.k">
+                    <div class="text-[9px] text-slate-400">{{ a.k }}</div>
+                    <div class="mt-0.5 text-[10.5px] font-medium text-slate-700 leading-snug break-words">{{ a.v }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 05 Diff -->
+          <section class="card col-span-12 lg:col-span-8 p-4 flex flex-col"
+                   >
+            <div class="flex items-center gap-2 mb-3">
+              <span class="px-2 py-0.5 rounded-md bg-blue-50 text-blue-600 border border-blue-200 text-[10px] font-bold mono">05</span>
+              <span class="text-[10px] font-semibold tracking-wider text-slate-400">新旧政策关键条款 · CLAUSE DIFF</span>
+            </div>
+
+            <div class="space-y-2.5 overflow-y-auto thin pr-0.5" :class="activeView === 'all' ? '' : 'flex-1 min-h-0'">
+              <div v-for="(d, i) in result.clause_diffs" :key="i" class="border border-slate-200 rounded-lg overflow-hidden">
+                <div class="bg-slate-50 px-3 py-1.5 flex items-center justify-between gap-2 border-b border-slate-200">
+                  <span class="text-[11.5px] font-semibold text-slate-800">{{ d.dimension }}</span>
+                  <span class="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold border" :style="impactStyle(d.impact_level)">
+                    {{ impactLabel(d.impact_level) }}
+                  </span>
+                </div>
+                <div class="p-2 space-y-1.5">
+                  <div class="bg-rose-50/60 border-l-[3px] border-rose-500 p-2 rounded-r">
+                    <div class="text-[9.5px] font-bold text-rose-700 mb-0.5">− 旧规（已失效口径）</div>
+                    <p class="text-[11.5px] text-slate-700 leading-relaxed">
+                      <span v-for="(seg, si) in d.old_segments" :key="'o' + si" :class="seg.op === 'delete' ? 'key-old' : ''">{{ seg.text }}</span>
+                    </p>
+                  </div>
+                  <div class="bg-emerald-50/60 border-l-[3px] border-emerald-500 p-2 rounded-r">
+                    <div class="text-[9.5px] font-bold text-emerald-700 mb-0.5">+ 新规（现行执行口径）</div>
+                    <p class="text-[11.5px] text-slate-700 leading-relaxed">
+                      <span v-for="(seg, si) in d.new_segments" :key="'n' + si" :class="seg.op === 'insert' ? 'key-new' : ''">{{ seg.text }}</span>
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- ============ 视图：权威信源溯源库 ============ -->
+      <div v-if="result && isView('sources')" :class="activeView === 'all' ? 'fade-in' : 'h-full fade-in'">
+        <section class="card p-4 flex flex-col" >
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 rounded-md bg-blue-50 text-blue-600 border border-blue-200 text-[10px] font-bold mono">06</span>
+              <span class="text-[10px] font-semibold tracking-wider text-slate-400">权威信源与防伪溯源 · SOURCES</span>
+              <span class="mono text-[10px] text-slate-400">共 {{ displaySources.length }} 条 · 已按权威度排序</span>
+            </div>
+            <button @click="openReport" :disabled="!result"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 text-[11.5px] font-medium hover:border-blue-300 hover:text-blue-700 disabled:opacity-40 transition">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/>
+              </svg>
+              预览核验单
+            </button>
+            <button @click="exportReport" :disabled="exporting"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-[11.5px] font-medium shadow-sm shadow-blue-500/20 hover:opacity-95 disabled:opacity-50 transition">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              {{ exporting ? '生成中…' : '导出 Markdown 报告' }}
+            </button>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2.5 overflow-y-auto thin pr-0.5"
+               :class="activeView === 'all' ? '' : 'flex-1 min-h-0'">
+            <a v-for="(s, i) in displaySources" :key="i" :href="s.url" target="_blank" rel="noopener"
+               class="group border border-slate-200 rounded-lg p-3 hover:border-blue-300 hover:shadow-sm transition">
+              <div class="flex items-start justify-between gap-2">
+                <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold border" :style="trustStyle(s.trust_level)">{{ trustLabel(s) }}</span>
+                <span class="shrink-0 text-[9px] text-slate-500 px-1.5 py-0.5 rounded bg-slate-100">{{ s.site_label || s.source_type }}</span>
+              </div>
+              <h4 class="mt-1.5 text-[11.5px] font-semibold text-slate-800 leading-snug group-hover:text-blue-700 transition line-clamp-2">
+                {{ s.title }}
+              </h4>
+              <div class="mt-1 text-[10.5px] text-slate-500">
+                {{ s.department || '官方发布' }} · <span class="mono">{{ s.publish_time }}</span>
+              </div>
+              <div class="mt-1.5 flex items-center gap-1 text-[9.5px] mono text-slate-400">
+                <svg class="shrink-0" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></svg>
+                <span class="truncate">{{ prettyUrl(s.url) }}</span>
+              </div>
+            </a>
+          </div>
+
+          <p class="mt-3 pt-2.5 border-t border-slate-100 text-[10px] text-slate-400 leading-relaxed shrink-0">
+            · 交叉核验说明：以上 S 级政务公报与 A 级部门解读已完成多源时间戳比对，证据链闭环率 100%。
+          </p>
+        </section>
+      </div>
+    </div>
+
+    <!-- 页脚声明 -->
+    <footer class="shrink-0 px-5 py-2 border-t border-slate-200 bg-white/70">
+      <p class="text-[10px] leading-relaxed text-slate-400 truncate">
+        核验声明：本系统通过元宝搜索多路交叉求证引擎实时穿透全国各级人民政府门户网站（gov.cn）及官方认证政务新媒体，核验结论与条款对比仅供合规审计与申报参考，支持一键导出 Markdown 溯源报告。
+      </p>
+    </footer>
+  </main>
+
+  <!-- ==================== 引擎与密钥设置弹窗 ==================== -->
+  <template v-if="settingsOpen">
+    <div class="fixed inset-0 bg-slate-900/35 backdrop-blur-sm z-40" @click="closeSettings"></div>
+    <div class="fixed inset-0 z-50 grid place-items-center p-5 pointer-events-none">
+      <div class="w-[min(780px,96vw)] max-h-[91vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col pointer-events-auto overflow-hidden">
+
+        <!-- 头部 -->
+        <div class="px-6 py-4 border-b border-slate-200 flex items-start gap-3 shrink-0">
+          <div class="w-9 h-9 shrink-0 rounded-lg bg-blue-50 border border-blue-200 grid place-items-center">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/>
+              <circle cx="16.5" cy="7.5" r=".5" fill="#2563eb" stroke="none"/>
+            </svg>
+          </div>
+          <div class="min-w-0">
+            <h2 class="text-[15px] font-bold text-slate-900 leading-tight">元宝搜索接入配置</h2>
+            <p class="text-[11px] text-slate-400 mt-1">填入服务 API KEY 即可激活实时检索；判定与条款对比由确定性规则引擎完成，无需额外模型</p>
+          </div>
+          <button @click="closeSettings" aria-label="关闭"
+            class="ml-auto w-7 h-7 shrink-0 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 grid place-items-center transition">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+
+        <!-- 表单区 -->
+        <div class="px-6 py-4 overflow-y-auto thin space-y-3.5 flex-1 min-h-0">
+
+          <!-- 卡片 A：元宝搜索 -->
+          <section class="rounded-xl border border-slate-200 overflow-hidden bg-white">
+            <div class="px-4 py-2.5 bg-slate-50/80 border-b border-slate-100 flex items-center gap-2">
+              <svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+              </svg>
+              <div class="min-w-0">
+                <div class="text-[12px] font-semibold text-slate-800 leading-tight">元宝搜索接口配置</div>
+                <div class="text-[9px] mono tracking-[0.1em] text-slate-400 mt-0.5">YUANBAO SEARCH API · API KEY</div>
+              </div>
+              <span class="ml-auto shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold border"
+                    :class="settingsForm.yuanbao_api_key
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : 'bg-slate-100 text-slate-500 border-slate-200'">
+                {{ settingsForm.yuanbao_api_key ? '浏览器密钥' : '系统默认' }}
+              </span>
+            </div>
+
+            <div class="px-4 py-3.5 space-y-3">
+              <label class="block">
+                <span class="block text-[11px] font-medium text-slate-600 mb-1">元宝搜索 API Key</span>
+                <div class="relative">
+                  <input :type="ybKeyVisible ? 'text' : 'password'" v-model.trim="settingsForm.yuanbao_api_key"
+                         placeholder="请输入元宝搜索服务 API KEY（sk-...）"
+                         autocomplete="off" spellcheck="false"
+                         class="w-full h-9 pl-3 pr-10 rounded-lg border border-slate-200 bg-white text-[12px] text-slate-800 mono placeholder:text-slate-300 outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-500/10 transition" />
+                  <button type="button" @click="ybKeyVisible = !ybKeyVisible"
+                          :aria-label="ybKeyVisible ? '隐藏密钥' : '显示密钥'"
+                          class="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-md grid place-items-center text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition">
+                    <svg v-if="!ybKeyVisible" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>
+                    </svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/>
+                      <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/>
+                      <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/>
+                      <path d="m2 2 20 20"/>
+                    </svg>
+                  </button>
+                </div>
+                <span class="mt-1 block text-[9.5px] leading-relaxed text-slate-400">
+                  填控制台「服务 API KEY」创建的那把密钥即可（<span class="mono">sk-</span> 开头），Base URL 留空就用默认端点。
+                  仍兼容腾讯云标准方式的 <span class="mono">SecretId|SecretKey</span>（竖线分隔）。
+                </span>
+              </label>
+
+              <label class="block">
+                <span class="block text-[11px] font-medium text-slate-600 mb-1">搜索接口 Endpoint / Base URL<span class="text-slate-400 font-normal">（可选，留空用默认）</span></span>
+                <input v-model.trim="settingsForm.yuanbao_base_url" :placeholder="searchBasePlaceholder"
+                       autocomplete="off" spellcheck="false"
+                       class="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px] text-slate-800 mono placeholder:text-slate-300 outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-500/10 transition" />
+                <span class="mt-1 block text-[9.5px] leading-relaxed text-slate-400">
+                  {{ searchBaseHint }}
+                </span>
+              </label>
+
+              <label class="block">
+                <span class="block text-[11px] font-medium text-slate-600 mb-1">检索并发策略</span>
+                <select v-model="settingsForm.concurrency"
+                        class="w-full h-9 px-2 rounded-lg border border-slate-200 bg-white text-[11.5px] text-slate-700 outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-500/10 transition">
+                  <option value="three_way">三路并发穿透（政务原文 + 废止目录 + 官微新政）</option>
+                  <option value="two_way">双路校验（政务原文 + 废止目录）</option>
+                  <option value="single">单路快速（仅政务原文）</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <!-- 判定方式说明：交代"为什么只需要配一把 Key" -->
+          <div class="rounded-xl border border-blue-100 bg-blue-50/50 px-4 py-3 flex items-start gap-2.5">
+            <svg class="shrink-0 mt-[1px]" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="#2563eb" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3 4.5 6v6c0 4.4 3 8 7.5 9.5 4.5-1.5 7.5-5.1 7.5-9.5V6L12 3Z"/>
+              <path d="m8.8 12 2.2 2.2 4.2-4.4"/>
+            </svg>
+            <div class="min-w-0">
+              <div class="text-[11.5px] font-semibold text-slate-800 leading-tight">效力判定由确定性规则引擎完成</div>
+              <p class="mt-1 text-[10.5px] leading-relaxed text-slate-500">
+                四态结论、演进时间轴与条款对比全部基于检索证据按固定规则推导，不调用外部大模型，
+                因此只需要配置上面的元宝搜索 API KEY，配置一项即可跑通全链路。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 底部操作栏 -->
+        <div class="px-6 py-3.5 border-t border-slate-200 bg-slate-50/60 shrink-0">
+          <div v-if="settingsPreflight" class="mb-2 px-3 py-2 rounded-lg bg-amber-50/80 border border-amber-200 text-[11px] leading-relaxed text-amber-800 flex items-start gap-1.5">
+            <svg class="shrink-0 mt-[2px]" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m21.7 18-8-14a2 2 0 0 0-3.5 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3z"/>
+              <path d="M12 9v4"/><path d="M12 17h.01"/>
+            </svg>
+            <span>{{ settingsPreflight }}</span>
+          </div>
+
+          <div class="flex items-center gap-2 flex-wrap">
+            <button @click="testConnection" :disabled="testing"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-[11.5px] font-medium text-slate-700 hover:border-blue-300 hover:text-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition">
+              <svg :class="testing ? 'spin' : ''" width="12" height="12" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>
+              </svg>
+              {{ testing ? '正在测试…' : '测试接口连通性' }}
+            </button>
+            <span class="text-[9.5px] text-slate-400">仅用当前填写内容发起一次真实探测，不会保存</span>
+          </div>
+
+          <div v-if="testResult"
+               class="mt-2 px-3 py-2 rounded-lg border text-[11px] leading-relaxed flex items-start gap-1.5 fade-in"
+               :class="testResult.ok
+                 ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                 : 'bg-rose-50 border-rose-200 text-rose-800'">
+            <svg class="shrink-0 mt-0.5" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path v-if="testResult.ok" d="M20 6 9 17l-5-5"/>
+              <template v-else><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></template>
+            </svg>
+            <span class="flex-1">{{ testResult.message }}</span>
+            <span class="mono text-[10px] shrink-0 opacity-70">{{ testResult.latency_ms }} ms</span>
+          </div>
+
+          <div class="mt-3 pt-3 border-t border-slate-200/70 flex items-center gap-2">
+            <button @click="clearSettings" :disabled="settingsSaving"
+                    class="px-3 py-2 rounded-lg border border-slate-200 bg-white text-[11.5px] text-slate-500 hover:text-rose-600 hover:border-rose-200 disabled:opacity-60 transition">
+              清除自定义配置
+            </button>
+            <div class="ml-auto flex items-center gap-2">
+              <button @click="closeSettings"
+                      class="px-3.5 py-2 rounded-lg border border-slate-200 bg-white text-[11.5px] font-medium text-slate-700 hover:bg-slate-50 transition">
+                取消
+              </button>
+              <button @click="saveSettings" :disabled="settingsSaving"
+                      class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-[11.5px] font-semibold shadow-sm shadow-blue-500/25 hover:opacity-95 disabled:opacity-70 transition">
+                <svg v-if="settingsSaving" class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                </svg>
+                {{ settingsSaving ? '正在启用…' : '保存并立即启用' }}
+              </button>
+            </div>
+          </div>
+
+          <p class="mt-2.5 text-[9.5px] leading-relaxed text-slate-400">
+            安全声明：您填入的 API 密钥仅保存在本地浏览器（localStorage）及当前会话内存中，仅用于向官方接口发起核验请求，绝不上传至任何第三方服务器。
+          </p>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ==================== API 调试抽屉 ==================== -->
+  <template v-if="drawerOpen">
+    <div class="fixed inset-0 bg-slate-900/30 backdrop-blur-sm z-40" @click="drawerOpen = false"></div>
+    <aside class="fixed top-0 right-0 bottom-0 w-[min(660px,95vw)] bg-white z-50 overflow-y-auto shadow-2xl border-l border-slate-200 thin">
+      <div class="sticky top-0 bg-white/95 backdrop-blur border-b border-slate-200 px-6 py-3.5 flex items-start justify-between">
+        <div>
+          <h2 class="text-[14px] font-bold text-slate-900">开放 API 接口调试</h2>
+          <p class="text-[11px] text-slate-400 mt-0.5">前后端严格分离 · 全部能力以 RESTful 接口暴露</p>
+        </div>
+        <button @click="drawerOpen = false" class="w-7 h-7 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 transition grid place-items-center">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="px-6 py-4 space-y-4">
+        <div class="rounded-lg bg-slate-50 border border-slate-200 p-3">
+          <div class="grid grid-cols-2 gap-3 text-[11px]">
+            <div><span class="text-slate-400">检索引擎</span><div class="font-medium text-slate-700 mt-0.5">元宝搜索 · 三路并发</div></div>
+            <div><span class="text-slate-400">信源范围</span><div class="font-medium text-slate-700 mt-0.5">全国 gov.cn + 官方新媒体</div></div>
+            <div><span class="text-slate-400">响应结构</span><div class="font-medium text-slate-700 mt-0.5">JSON / SSE 流式</div></div>
+            <div><span class="text-slate-400">鉴权方式</span><div class="font-medium text-slate-700 mt-0.5">TC3-HMAC-SHA256 / Bearer</div></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[10.5px] font-semibold tracking-wide text-slate-400 mb-1.5">接口清单</div>
+          <div v-for="(e, i) in snippets.endpoints" :key="i"
+               class="flex items-center gap-2.5 py-1.5 border-b border-slate-100 last:border-0 text-[11px]">
+            <span class="mono px-1.5 py-0.5 rounded text-[9px] font-bold"
+                  :class="e.method === 'GET' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-blue-50 text-blue-700 border border-blue-200'">{{ e.method }}</span>
+            <code class="mono text-slate-700">{{ e.path }}</code>
+            <span class="ml-auto text-slate-400 text-right">{{ e.desc }}</span>
+          </div>
+        </div>
+
+        <div>
+          <div class="flex items-center gap-2 mb-1.5">
+            <div class="text-[10.5px] font-semibold tracking-wide text-slate-400">调用示例</div>
+            <div class="ml-auto flex items-center gap-1">
+              <button v-for="t in ['curl','python','javascript']" :key="t" @click="snippetTab = t"
+                      class="px-2 py-0.5 rounded text-[10.5px] transition"
+                      :class="snippetTab === t ? 'bg-blue-50 text-blue-700 border border-blue-200 font-medium' : 'text-slate-500 border border-transparent hover:bg-slate-50'">{{ t }}</button>
+              <button @click="copySnippet" class="ml-1 px-2 py-0.5 rounded border border-slate-200 text-[10.5px] text-slate-600 hover:bg-slate-50 transition">复制</button>
+            </div>
+          </div>
+          <pre class="mono text-[10.5px] leading-relaxed bg-slate-900 text-slate-100 rounded-lg p-3.5 overflow-x-auto">{{ snippets[snippetTab] }}</pre>
+        </div>
+
+        <div>
+          <div class="text-[10.5px] font-semibold tracking-wide text-slate-400 mb-1.5">请求体</div>
+          <pre class="mono text-[10.5px] leading-relaxed bg-slate-50 border border-slate-200 text-slate-700 rounded-lg p-3.5 overflow-x-auto">{{ sampleBody }}</pre>
+        </div>
+
+        <p class="text-[11px] text-slate-400 leading-relaxed">
+          完整交互式文档见 <a href="/docs" target="_blank" rel="noopener" class="text-blue-600 hover:underline">/docs</a>（Swagger），支持在线调用并查看响应结构。
+        </p>
+      </div>
+    </aside>
+  </template>
+
+  <!-- ==================== 核验报告预览弹窗 ==================== -->
+  <template v-if="reportOpen">
+    <div class="fixed inset-0 bg-slate-900/35 backdrop-blur-sm z-40" @click="reportOpen = false"></div>
+    <div class="fixed inset-0 z-50 grid place-items-center p-6 pointer-events-none">
+      <div class="w-[min(760px,94vw)] max-h-[88vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col pointer-events-auto overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex items-start justify-between">
+          <div>
+            <div class="text-[10px] mono tracking-wider text-slate-400">COMPLIANCE AUDIT REPORT</div>
+            <h2 class="text-[15px] font-bold text-slate-900 mt-0.5">政策时效性合规审计报告</h2>
+            <p class="text-[11px] text-slate-400 mt-0.5">
+              {{ displayTitle }} · {{ result.policy_meta.doc_number || '未标注文号' }}
+            </p>
+          </div>
+          <button @click="reportOpen = false" class="w-7 h-7 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 grid place-items-center">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+
+        <div class="px-6 py-4 overflow-y-auto thin flex-1 space-y-3.5">
+          <div class="flex items-center gap-2.5">
+            <span class="px-2 py-1 rounded-md text-[11px] font-bold border"
+                  :style="{color: statusTheme.hex, borderColor: statusTheme.hex + '55', background: statusTheme.hex + '12'}">
+              {{ result.validity_result.status_label }}
+            </span>
+            <span class="text-[11px] text-slate-500 mono">可信度 {{ result.validity_result.confidence_score }} / 权威度 {{ result.validity_result.authority_score }}</span>
+          </div>
+
+          <p class="text-[12px] leading-relaxed text-slate-600 bg-slate-50 rounded-lg p-3 border border-slate-100">
+            {{ cleanText(result.validity_result.summary) }}
+          </p>
+
+          <div>
+            <div class="text-[10px] font-semibold tracking-wider text-slate-400 mb-1.5">一、政策要素</div>
+            <div class="grid grid-cols-2 gap-x-4 gap-y-1.5">
+              <div v-for="m in metaGrid" :key="'r' + m.k">
+                <div class="text-[9.5px] text-slate-400">{{ m.k }}</div>
+                <div class="text-[11px] text-slate-700 leading-snug">{{ m.v }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="text-[10px] font-semibold tracking-wider text-slate-400 mb-1.5">二、风险与办理指引</div>
+            <div class="grid grid-cols-2 gap-2.5">
+              <div class="rounded-lg bg-rose-50/60 border border-rose-200 p-2.5">
+                <div class="text-[9.5px] font-semibold text-rose-700">拦截风险动作</div>
+                <p class="mt-1 text-[10.5px] leading-relaxed text-slate-600">{{ guide.risk }}</p>
+              </div>
+              <div class="rounded-lg bg-emerald-50/60 border border-emerald-200 p-2.5">
+                <div class="text-[9.5px] font-semibold text-emerald-700">现行办理指引</div>
+                <p class="mt-1 text-[10.5px] leading-relaxed text-slate-600">{{ guide.action }}</p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="text-[10px] font-semibold tracking-wider text-slate-400 mb-1.5">三、政策演进（{{ result.timeline.length }} 个节点）</div>
+            <div class="space-y-1">
+              <div v-for="(n, i) in result.timeline" :key="'t' + i" class="flex items-start gap-2 text-[11px]">
+                <span class="mono text-slate-400 shrink-0 w-[70px]">{{ n.date }}</span>
+                <span class="text-slate-700">{{ n.event }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="text-[10px] font-semibold tracking-wider text-slate-400 mb-1.5">四、信源（展示 {{ Math.min(4, displaySources.length) }} / 共 {{ displaySources.length }} 条）</div>
+            <div class="space-y-1">
+              <div v-for="(s, i) in displaySources.slice(0, 4)" :key="'s' + i" class="text-[10.5px] text-slate-600 truncate">
+                · {{ s.title }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="px-6 py-3.5 border-t border-slate-200 bg-slate-50/60 flex items-center gap-2">
+          <button @click="copyBrief"
+            class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-[11.5px] font-semibold shadow-sm shadow-blue-500/20 hover:opacity-95 transition">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>
+            </svg>
+            复制企微/飞书核验简报
+          </button>
+          <button @click="downloadReport"
+            class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-[11.5px] font-medium hover:border-blue-300 hover:text-blue-700 transition">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+            </svg>
+            下载 .md 报告
+          </button>
+          <span class="ml-auto text-[10px] text-slate-400">生成于 {{ reportTime }}</span>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <div v-if="toast"
+       class="fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] px-3.5 py-2 rounded-lg bg-slate-900 text-white text-[11.5px] shadow-xl">
+    {{ toast }}
+  </div>
+</div>
+
+<script src="/static/app.js?v=20261101.4"></script>
+</body>
+</html>
